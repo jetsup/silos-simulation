@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GrainPlant SCADA: Silo &amp; Tank Simulation</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+<div id="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">◈</div>
+      <div class="brand-text">
+        <div class="brand-title">GRAINPLANT <span>SCADA</span></div>
+        <div class="brand-sub">Flour Mill • Silo Monitoring &amp; Simulation</div>
+        <div class="clock brand-clock"><span class="dot"></span><span id="clock">--:--:--</span><span id="sim-time">T+0h</span></div>
+      </div>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><label>TOTAL STOCK</label><b id="kpi-stock">—</b><small id="kpi-stock-sub">—</small></div>
+      <div class="kpi"><label>AVG GRAIN TEMP</label><b id="kpi-temp">—</b><small id="kpi-temp-sub">ambient —</small></div>
+      <div class="kpi"><label>AVG MOISTURE</label><b id="kpi-hum">—</b><small>target 12.5 – 14.0%</small></div>
+      <div class="kpi"><label>DIESEL</label><b id="kpi-diesel">—</b><small id="kpi-diesel-sub">—</small></div>
+      <div class="kpi wide"><label>AMBIENT</label><b class="inline"><span id="amb-t">—</span><i>•</i><span id="amb-h">—</span></b><small>air temp • humidity</small></div>
+      <div class="kpi alarms"><label>ALARMS</label><b id="kpi-alarm">0</b><small id="kpi-alarm-sub">all clear</small></div>
+    </div>
+    <div class="sim-controls">
+      <div class="ctl-group"><label>SIMULATION</label>
+        <div class="btn-row">
+          <button id="btn-play" class="btn primary">⏸ Pause</button>
+          <select id="sel-speed" title="Simulation speed">
+            <option value="1">1× realtime</option>
+            <option value="10" selected>10× fast</option>
+            <option value="60">60× demo</option>
+            <option value="300">300× rush</option>
+          </select>
+        </div>
+      </div>
+      <div class="ctl-group"><label>PLANT ACTIONS</label>
+        <div class="btn-row">
+          <button id="btn-fill-all" class="btn" title="Continuously fill every vessel. Press again to stop">▲ Fill all</button>
+          <button id="btn-empty-all" class="btn" title="Continuously empty every vessel. Press again to stop">▼ Empty all</button>
+          <button id="btn-events" class="btn warn" title="Show the live warning feed. Press again to hide">⚡ Events</button>
+          <button id="btn-reset" class="btn danger">↺ Reset</button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="sidebar">
+      <button class="nav active" data-filter="all">◎ Overview <span>17 vessels</span></button>
+      <button class="nav" data-filter="grain">⬢ Grain Silos <span>3 × 40m</span></button>
+      <button class="nav" data-filter="dirty">⬣ Dirty Wheat <span>2 × 40m</span></button>
+      <button class="nav" data-filter="cond">⬔ Conditioning <span>6 units</span></button>
+      <button class="nav" data-filter="flour">⬓ Flour Bins <span>5 units</span></button>
+      <button class="nav" data-filter="diesel">⬕ Diesel Tank <span>5.3 m³</span></button>
+      <div class="side-box">
+        <h4>PLANT LEGEND</h4>
+        <div><i class="led ok"></i> Normal</div>
+        <div><i class="led warn"></i> Warning</div>
+        <div><i class="led alarm"></i> Alarm / Full / Hot</div>
+        <div><i class="led flow"></i> Flowing (blinks blue ↔ status)</div>
+        <p class="hint">Each 40 m silo = <b>32 segments × 10 t = 320 t</b>. Level m = % × 40 m.<br><br>Conditioning: 18 m / 96 t.<br>Flour: 15 m / 50 t.<br>Diesel horizontal: Ø1.5 m × L3.0 m = 5 301 L.</p>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div id="alarm-bar" class="alarm-bar hidden"></div>
+
+      <section class="group" data-group="3d">
+        <div class="group-head"><h2>🏭 3D Plant Overview (Live)</h2><p>Drag to orbit • scroll to zoom • click a silo to open controls</p></div>
+        <div class="plant3d-wrap"><div id="plant3d"></div><div id="plant3d-tip" class="tip hidden"></div></div>
+      </section>
+
+      <section class="group" data-group="grain">
+        <div class="group-head"><h2>🌾 Grain Silos (40 m • 320 t)</h2><p>32 segments × 10 t • monitored height, temperature, moisture</p></div>
+        <div id="grid-grain" class="grid"></div>
+      </section>
+
+      <section class="group" data-group="dirty">
+        <div class="group-head"><h2>🟤 Dirty Wheat Silos (40 m • 320 t)</h2><p>Pre-cleaning buffer • higher moisture watch</p></div>
+        <div id="grid-dirty" class="grid"></div>
+      </section>
+
+      <section class="group" data-group="cond">
+        <div class="group-head"><h2>💧 Conditioning Silos (18 m • 96 t)</h2><p>Tempering / damping • humidity critical</p></div>
+        <div id="grid-cond" class="grid small"></div>
+      </section>
+
+      <section class="group" data-group="flour">
+        <div class="group-head"><h2>⚪ Flour Bins (15 m • 50 t)</h2><p>Finished product • low moisture, temperature watch</p></div>
+        <div id="grid-flour" class="grid small"></div>
+      </section>
+
+      <section class="group" data-group="diesel">
+        <div class="group-head"><h2>🛢️ Diesel Tank (Horizontal Ø1.5 m × L3.0 m)</h2><p>Volume 5.30 m³ (5 301 L) • true horizontal-cylinder geometry</p></div>
+        <div id="grid-diesel" class="grid diesel-grid"></div>
+      </section>
+
+      <section class="group trends">
+        <div class="group-head"><h2>📈 Live Trend (select any vessel)</h2><p>Level, temperature &amp; moisture history (rolling window)</p></div>
+        <div class="trend-box">
+          <div class="trend-head">
+            <select id="sel-trend"></select>
+            <select id="sel-range" title="X-axis window">
+              <option value="30">Last 30 samples</option>
+              <option value="60">Last 60 samples</option>
+              <option value="120" selected>Last 120 samples</option>
+              <option value="240">Last 240 samples</option>
+            </select>
+            <div class="legend"><span><i class="sw lvl"></i>Level %</span><span><i class="sw tmp"></i>Temp °C</span><span><i class="sw hum"></i>Moist %</span></div>
+          </div>
+          <div class="chart-wrap"><canvas id="trend"></canvas></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head"><h3 id="m-title">Vessel</h3><button id="m-close" class="btn">✕</button></div>
+      <div class="modal-body">
+        <div id="m-viz"></div>
+        <div class="m-info">
+          <div class="m-stats" id="m-stats"></div>
+          <label>Fill rate <b id="m-fill-v"></b></label>
+          <input id="m-fill" type="range" min="0" max="120" value="0">
+          <label>Discharge rate <b id="m-dis-v"></b></label>
+          <input id="m-dis" type="range" min="0" max="120" value="0">
+          <div class="btn-row">
+            <button id="m-add" class="btn primary">+10 t</button>
+            <button id="m-add1" class="btn">+1 seg</button>
+            <button id="m-rem" class="btn danger">−10 t</button>
+          </div>
+          <div class="btn-row">
+            <button id="m-aer" class="btn">❄ Toggle aeration</button>
+            <button id="m-topup" class="btn">Top-up 95%</button>
+            <button id="m-empty" class="btn">Empty</button>
+          </div>
+          <p class="hint">Rates run continuously while playing. Try 60× to see fast movement.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <aside id="event-feed" class="event-feed hidden">
+    <div class="feed-head"><span>⚡ LIVE WARNINGS</span><button id="feed-close" class="btn" title="Hide feed">✕</button></div>
+    <ul id="feed-list"></ul>
+  </aside>
+
+  <button id="fab" class="fab" title="About this simulation">?</button>
+  <div id="info-modal" class="modal hidden">
+    <div class="modal-card info-card">
+      <div class="modal-head"><h3>About this simulation</h3><button id="info-close" class="btn">✕</button></div>
+      <div class="info-body">
+        <h4>Level &amp; stock</h4>
+        <p>Level integrates fill − discharge continuously. Each 40 m silo holds 32 segments × 10 t = 320 t; displayed height = level % × silo height.</p>
+        <h4>Temperature &amp; moisture</h4>
+        <p>Values drift toward the ambient day-cycle. Moist, full silos self-heat; aeration cools the grain and dries it toward its target.</p>
+        <h4>Diesel &amp; generator</h4>
+        <p>The tank uses true horizontal-cylinder geometry (Ø1.5 m × L3.0 m ≈ 5 301 L). The generator draws 25 L/h while switched on, plus a tiny standby loss.</p>
+        <p class="disclaimer">All values are simulated, not for operations.</p>
+      </div>
+    </div>
+  </div>
+</div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
