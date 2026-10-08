@@ -1,8 +1,19 @@
 // Plant model + simulation engine (pure logic, no rendering libs here).
-// Capacities: 40m silos = 32 seg x 10t = 320t. Cond 18m/96t. Flour 15m/50t.
-// Diesel: horizontal cylinder D=1.5m L=3.0m -> Vmax = pi r^2 L.
+// All thresholds and capacities live in silo_credentials.js.
+import {
+  GRAIN_SILO_HEIGHT_M, GRAIN_SILO_CAPACITY_T,
+  COND_SILO_HEIGHT_M, COND_SILO_CAPACITY_T,
+  FLOUR_BIN_HEIGHT_M, FLOUR_BIN_CAPACITY_T,
+  SEGMENT_TONNES,
+  DIESEL_TANK_DIAMETER_M, DIESEL_TANK_LENGTH_M,
+  LEVEL_HI_HI_PCT, LEVEL_HIGH_PCT, LEVEL_LOW_PCT, DIESEL_CRITICAL_L,
+  GRAIN_HOT_C, GRAIN_WARM_C, FUEL_HOT_C,
+  MOIST_WET_LIMIT_DEFAULT, MOIST_WET_LIMIT_FLOUR, MOIST_WET_LIMIT_DIRTY, MOIST_WET_MARGIN,
+  GEN_MIN_L, GEN_CONSUMPTION_LPH, DIESEL_STANDBY_LOSS_LPH,
+  AMBIENT_BASE_C, AMBIENT_SWING_C, AMBIENT_TROUGH_HOUR, AMBIENT_RH_BASE, AMBIENT_RH_SWING
+} from './silo_credentials.js';
 
-export const DIESEL = { D: 1.5, L: 3.0 };
+export const DIESEL = { D: DIESEL_TANK_DIAMETER_M, L: DIESEL_TANK_LENGTH_M };
 export const DIESEL_VMAX = Math.PI * (DIESEL.D / 2) ** 2 * DIESEL.L * 1000; // litres ~5301
 
 export function dieselVolumeFromHeight(h) {
@@ -44,14 +55,14 @@ export function createPlant() {
   const v = [];
   const R = (a, b) => a + Math.random() * (b - a);
   for (let i = 1; i <= 3; i++)
-    v.push(mk(`G-0${i}`, `Grain Silo G-0${i}`, 'grain', 40, 320, R(120, 240), R(22, 27), R(12.2, 13.8)));
+    v.push(mk(`G-0${i}`, `Grain Silo G-0${i}`, 'grain', GRAIN_SILO_HEIGHT_M, GRAIN_SILO_CAPACITY_T, R(120, 240), R(22, 27), R(12.2, 13.8)));
   for (let i = 1; i <= 2; i++)
-    v.push(mk(`DW-0${i}`, `Dirty Wheat DW-0${i}`, 'dirty', 40, 320, R(150, 260), R(23, 28), R(14.5, 16.5)));
+    v.push(mk(`DW-0${i}`, `Dirty Wheat DW-0${i}`, 'dirty', GRAIN_SILO_HEIGHT_M, GRAIN_SILO_CAPACITY_T, R(150, 260), R(23, 28), R(14.5, 16.5)));
   for (let i = 1; i <= 6; i++)
-    v.push(mk(`CD-0${i}`, `Conditioning CD-0${i}`, 'cond', 18, 96, R(25, 65), R(21, 26), R(14.0, 16.0)));
+    v.push(mk(`CD-0${i}`, `Conditioning CD-0${i}`, 'cond', COND_SILO_HEIGHT_M, COND_SILO_CAPACITY_T, R(25, 65), R(21, 26), R(14.0, 16.0)));
   for (let i = 1; i <= 5; i++)
-    v.push(mk(`F-0${i}`, `Flour Bin F-0${i}`, 'flour', 15, 50, R(15, 33), R(22, 26), R(11.5, 13.0)));
-  v.push(mk('DZL-01', 'Diesel Tank DZL-01', 'diesel', DIESEL.D, DIESEL_VMAX, DIESEL_VMAX * 0.62, 26, 0, { genOn: false, genRate: 25 }));
+    v.push(mk(`F-0${i}`, `Flour Bin F-0${i}`, 'flour', FLOUR_BIN_HEIGHT_M, FLOUR_BIN_CAPACITY_T, R(15, 33), R(22, 26), R(11.5, 13.0)));
+  v.push(mk('DZL-01', 'Diesel Tank DZL-01', 'diesel', DIESEL.D, DIESEL_VMAX, DIESEL_VMAX * 0.62, 26, 0, { genOn: false, genRate: GEN_CONSUMPTION_LPH }));
   return { vessels: v, simHours: 8.5, playing: true, speed: 10, fillAll: false, emptyAll: false, showEvents: false };
 }
 
@@ -60,24 +71,21 @@ export function levelM(x) {
   if (x.isDiesel) return dieselHeightFromVolume(x.level);
   return (levelPct(x) / 100) * x.heightM;
 }
-export function segments(x) { return x.isDiesel ? null : x.level / 10; }
+export function segments(x) { return x.isDiesel ? null : x.level / SEGMENT_TONNES; }
 
 export function ambientAt(simHours) {
   const t = ((simHours % 24) + 24) % 24;
-  const temp = 24 + 7 * Math.sin((2 * Math.PI * (t - 9)) / 24);
-  const rh = 58 - 12 * Math.sin((2 * Math.PI * (t - 9)) / 24);
+  const temp = AMBIENT_BASE_C + AMBIENT_SWING_C * Math.sin((2 * Math.PI * (t - AMBIENT_TROUGH_HOUR)) / 24);
+  const rh = AMBIENT_RH_BASE - AMBIENT_RH_SWING * Math.sin((2 * Math.PI * (t - AMBIENT_TROUGH_HOUR)) / 24);
   return { temp, rh };
 }
 
-export const GEN_MIN_PCT = 6; // below LOW-level: not enough fuel to crank the generator
-
 export function canStartGenerator(x) {
   if (!x.isDiesel) return { ok: false, reason: 'Only the diesel tank can run the generator.' };
-  const p = levelPct(x);
-  if (p < GEN_MIN_PCT) {
+  if (x.level < GEN_MIN_L) {
     return {
       ok: false,
-      reason: `Cannot start generator, no usable fuel (tank at ${Math.round(x.level).toLocaleString()} L, ${p.toFixed(1)}%). Refuel the tank first.`
+      reason: `Cannot start generator, tank is empty (${Math.round(x.level).toLocaleString()} L). Refuel the tank first.`
     };
   }
   return { ok: true };
@@ -86,19 +94,20 @@ export function canStartGenerator(x) {
 export function statusOf(x) {
   const p = levelPct(x);
   const alarms = [];
-  if (p >= 97) alarms.push('HI-HI level');
-  else if (p >= 92) alarms.push('HIGH level');
-  if (p <= 6) alarms.push('LOW level');
+  if (p >= LEVEL_HI_HI_PCT) alarms.push('HI-HI level');
+  else if (p >= LEVEL_HIGH_PCT) alarms.push('HIGH level');
+  if (p <= LEVEL_LOW_PCT) alarms.push('LOW level');
+  if (x.isDiesel && x.level < DIESEL_CRITICAL_L) alarms.push('FUEL CRITICAL');
   if (!x.isDiesel) {
-    if (x.tempC >= 37) alarms.push('HOT grain');
-    else if (x.tempC >= 33) alarms.push('Warm');
-    const wetLim = x.group === 'flour' ? 13.8 : x.group === 'dirty' ? 17 : 15.2;
-    if (x.moisture >= wetLim + 1.2) alarms.push('WET');
+    if (x.tempC >= GRAIN_HOT_C) alarms.push('HOT grain');
+    else if (x.tempC >= GRAIN_WARM_C) alarms.push('Warm');
+    const wetLim = x.group === 'flour' ? MOIST_WET_LIMIT_FLOUR : x.group === 'dirty' ? MOIST_WET_LIMIT_DIRTY : MOIST_WET_LIMIT_DEFAULT;
+    if (x.moisture >= wetLim + MOIST_WET_MARGIN) alarms.push('WET');
     else if (x.moisture >= wetLim) alarms.push('Moist high');
-  } else if (x.tempC >= 45) alarms.push('HOT fuel');
+  } else if (x.tempC >= FUEL_HOT_C) alarms.push('HOT fuel');
   const flowing = x.fillRate > 0 || x.disRate > 0 || !!x.genOn;
   let sev = 'ok';
-  if (alarms.some(a => /HI-HI|HOT|WET/.test(a))) sev = 'alarm';
+  if (alarms.some(a => /HI-HI|HOT|WET|CRITICAL/.test(a))) sev = 'alarm';
   else if (alarms.length) sev = 'warn';
   else if (flowing) sev = 'flow';
   return { sev, alarms, flowing };
@@ -135,11 +144,11 @@ export function tick(plant, dtSimSec) {
     } else {
       const target = amb.temp + 2;
       x.tempC += (target - x.tempC) * Math.min(1, 0.15 * dtH * 4);
-      // tanks breathe a little, very small standby loss even with everything off
-      x.level -= 0.02 * dtH; // ≈0.5 L/day
+      // tanks breathe a little: very small standby loss even with everything off
+      x.level -= DIESEL_STANDBY_LOSS_LPH * dtH;
       // generator consumes fuel continuously while switched on
       if (x.genOn) {
-        x.level -= (x.genRate || 25) * dtH;
+        x.level -= (x.genRate || GEN_CONSUMPTION_LPH) * dtH;
         x.flowing = Date.now();
       }
       if (x.level <= 0) { x.level = 0; x.genOn = false; }

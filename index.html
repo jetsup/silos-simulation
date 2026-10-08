@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>GrainPlant SCADA: Silo &amp; Tank Simulation</title>
+<title>SMART INVENTORY SYSTEM: Silo &amp; Tank Simulation</title>
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -15,7 +15,7 @@
     <div class="brand">
       <div class="logo">◈</div>
       <div class="brand-text">
-        <div class="brand-title">GRAINPLANT <span>SCADA</span></div>
+        <div class="brand-title" id="brand-name">SMART INVENTORY SYSTEM</div>
         <div class="brand-sub">Flour Mill • Silo Monitoring &amp; Simulation</div>
         <div class="clock brand-clock"><span class="dot"></span><span id="clock">--:--:--</span><span id="sim-time">T+0h</span></div>
       </div>
@@ -59,13 +59,14 @@
       <button class="nav" data-filter="cond">⬔ Conditioning <span>6 units</span></button>
       <button class="nav" data-filter="flour">⬓ Flour Bins <span>5 units</span></button>
       <button class="nav" data-filter="diesel">⬕ Diesel Tank <span>5.3 m³</span></button>
+      <button class="nav" data-filter="reports">📋 Reports <span>export</span></button>
       <div class="side-box">
         <h4>PLANT LEGEND</h4>
         <div><i class="led ok"></i> Normal</div>
         <div><i class="led warn"></i> Warning</div>
         <div><i class="led alarm"></i> Alarm / Full / Hot</div>
         <div><i class="led flow"></i> Flowing (blinks blue ↔ status)</div>
-        <p class="hint">Each 40 m silo = <b>32 segments × 10 t = 320 t</b>. Level m = % × 40 m.<br><br>Conditioning: 18 m / 96 t.<br>Flour: 15 m / 50 t.<br>Diesel horizontal: Ø1.5 m × L3.0 m = 5 301 L.</p>
+        <p class="hint">Content is measured in <b>tonnes (t)</b>, litres for diesel. Each 40 m silo = <b>32 segments × 10 t = 320 t</b>.<br><br>Conditioning: 18 m / 96 t.<br>Flour: 15 m / 50 t.<br>Diesel horizontal: Ø1.5 m × L3.0 m = 5 301 L.</p>
       </div>
     </nav>
 
@@ -102,8 +103,26 @@
         <div id="grid-diesel" class="grid diesel-grid"></div>
       </section>
 
+      <section class="group" data-group="reports">
+        <div class="group-head"><h2>📋 Reports &amp; Data Export</h2><p>Filter by vessel and time range, then view or download (requires the backend: npm run server)</p></div>
+        <div class="report-box">
+          <div class="rep-grid">
+            <div><label>Vessel</label><select id="rep-vessel"><option value="">All vessels</option></select></div>
+            <div><label>From</label><input id="rep-from" type="datetime-local"></div>
+            <div><label>To</label><input id="rep-to" type="datetime-local"></div>
+            <div class="rep-check"><label><input id="rep-all" type="checkbox" checked> All time</label></div>
+          </div>
+          <div class="btn-row">
+            <button id="rep-view" class="btn primary">View report</button>
+            <button id="rep-download" class="btn">Download PDF</button>
+            <button id="rep-csv" class="btn">Download CSV</button>
+          </div>
+          <p class="hint" id="rep-status">Connecting to database…</p>
+        </div>
+      </section>
+
       <section class="group trends">
-        <div class="group-head"><h2>📈 Live Trend (select any vessel)</h2><p>Level, temperature &amp; moisture history (rolling window)</p></div>
+        <div class="group-head"><h2>📈 Live Trend (select any vessel)</h2><p>Stock, temperature &amp; moisture history (rolling window)</p></div>
         <div class="trend-box">
           <div class="trend-head">
             <select id="sel-trend"></select>
@@ -113,7 +132,7 @@
               <option value="120" selected>Last 120 samples</option>
               <option value="240">Last 240 samples</option>
             </select>
-            <div class="legend"><span><i class="sw lvl"></i>Level %</span><span><i class="sw tmp"></i>Temp °C</span><span><i class="sw hum"></i>Moist %</span></div>
+            <div class="legend"><span><i class="sw lvl"></i>Stock (t)</span><span><i class="sw tmp"></i>Temp °C</span><span><i class="sw hum"></i>Moist %</span></div>
           </div>
           <div class="chart-wrap"><canvas id="trend"></canvas></div>
         </div>
@@ -160,8 +179,8 @@
     <div class="modal-card info-card">
       <div class="modal-head"><h3>About this simulation</h3><button id="info-close" class="btn">✕</button></div>
       <div class="info-body">
-        <h4>Level &amp; stock</h4>
-        <p>Level integrates fill − discharge continuously. Each 40 m silo holds 32 segments × 10 t = 320 t; displayed height = level % × silo height.</p>
+        <h4>Stock &amp; tonnage</h4>
+        <p>Content is measured in tonnes (t), litres for diesel. Stock integrates fill − discharge continuously. Each 40 m silo holds 32 segments × 10 t = 320 t.</p>
         <h4>Temperature &amp; moisture</h4>
         <p>Values drift toward the ambient day-cycle. Moist, full silos self-heat; aeration cools the grain and dries it toward its target.</p>
         <h4>Diesel &amp; generator</h4>

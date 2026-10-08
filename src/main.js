@@ -1,15 +1,36 @@
-// Entry: wires sim engine + three.js 3D + chart.js trend + canvas-gauges cards.
-import { createPlant, tick, ambientAt, levelPct, levelM, segments, statusOf, canStartGenerator, DIESEL_VMAX } from './sim.js';
+// Entry: thin HMI client. The backend owns the simulation and the database;
+// this polls live state every second and posts control commands.
 import { initPlant3D } from './plant3d.js';
-import { initTrend, pushTrend, setTrendWindow } from './trends.js';
+import { initTrend, setTrendWindow, setTrendData } from './trends.js';
 import { renderCards, refreshCards } from './ui.js';
-
-let plant = createPlant();
-let trendVessel = plant.vessels[0];
-let modalVessel = null;
-let lastTick = performance.now(), acc = 0, lastUi = 0, lastTrend = 0, lastFeed = 0;
+import { initReports } from './reports.js';
+import { POLL_STATE_MS, REFRESH_SLOW_MS, TOAST_MS } from './silo_credentials.js';
 
 const $ = id => document.getElementById(id);
+
+// Stable client-side vessel objects: merged in place on every poll so the
+// 3D scene (which holds references) and gauges never go stale.
+const vessels = [];
+const byId = new Map();
+function mergeState(list) {
+  for (const s of list) {
+    const v = byId.get(s.id);
+    if (v) Object.assign(v, s);
+    else {
+      const nv = { ...s };
+      vessels.push(nv);
+      byId.set(s.id, nv);
+    }
+  }
+}
+
+let live = null; // last /api/state payload
+let trendId = 'G-01';
+let modalId = null;
+let showEvents = false;
+let cardsBuilt = false;
+let view3d = null;
+let offlineShown = false;
 
 let toastTimer = 0;
 function notify(msg) {
@@ -17,122 +38,185 @@ function notify(msg) {
   t.textContent = msg;
   t.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.add('hidden'), 5000);
+  toastTimer = setTimeout(() => t.classList.add('hidden'), TOAST_MS);
 }
 
-// trend selector
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+
+// ---- controls: every change goes to the backend, then re-renders ----
+async function control(id, patch) {
+  try {
+    const r = await api('/api/control', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, patch })
+    });
+    applyState(r.state);
+  } catch (e) {
+    notify(e.message);
+  }
+}
+
+async function global(patch) {
+  try {
+    const r = await api('/api/global', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch)
+    });
+    applyState(r.state);
+  } catch (e) {
+    notify(e.message);
+  }
+}
+
+function applyState(st) {
+  if (!st) return;
+  live = st;
+  mergeState(st.vessels);
+  if (!cardsBuilt && vessels.length) {
+    renderCards(vessels, openModal, control);
+    fillTrendSel();
+    view3d = initPlant3D($('plant3d'), { vessels }, openModal);
+    initTrend($('trend'));
+    cardsBuilt = true;
+  }
+  refreshCards(vessels);
+  view3d?.update();
+  updateKpis(st);
+  syncHeaderButtons(st);
+  if (modalId && !$('modal').classList.contains('hidden')) drawModal();
+  if (showEvents) renderFeed();
+}
+
+async function fetchState() {
+  try {
+    const st = await api('/api/state');
+    if (offlineShown) {
+      offlineShown = false;
+      notify('Backend reconnected.');
+    }
+    applyState(st);
+  } catch {
+    if (!offlineShown) {
+      offlineShown = true;
+      notify('Backend offline! Start it with npm run server. Retrying…');
+    }
+  }
+}
+
+// trend selector (options come from the database-backed state)
 function fillTrendSel() {
   const s = $('sel-trend');
-  s.innerHTML = plant.vessels.map(v => `<option value="${v.uid}">${v.id}: ${v.name}</option>`).join('');
-  s.value = trendVessel.uid;
-  s.onchange = () => { trendVessel = plant.vessels.find(v => v.uid === +s.value); };
+  s.innerHTML = vessels.map(v => `<option value="${v.id}">${v.id} : ${v.name}</option>`).join('');
+  if (!byId.has(trendId) && vessels.length) trendId = vessels[0].id;
+  s.value = trendId;
+  s.onchange = () => {
+    trendId = s.value;
+    refreshTrend();
+  };
+}
+
+async function refreshTrend() {
+  const v = byId.get(trendId);
+  if (!v) return;
+  try {
+    const rows = await api(`/api/readings?vesselId=${encodeURIComponent(trendId)}&limit=240`);
+    setTrendData(rows, v.capacity, v.isDiesel);
+  } catch {
+    /* backend offline: keep the previous chart */
+  }
 }
 
 // modal
 function openModal(v) {
-  modalVessel = v;
+  modalId = v.id;
   $('modal').classList.remove('hidden');
   drawModal();
 }
 function drawModal() {
-  const v = modalVessel; if (!v) return;
-  $('m-title').textContent = `${v.id}: ${v.name}`;
-  const p = levelPct(v), m = levelM(v);
-  // modal border blinks red on alarm; the offending values take warning colors
-  const st = statusOf(v);
-  const mcard = document.querySelector('.modal-card');
-  mcard.classList.toggle('alarm', st.sev === 'alarm');
-  mcard.classList.toggle('warn', st.sev === 'warn');
+  const v = byId.get(modalId);
+  if (!v) return;
+  $('m-title').textContent = `${v.id} : ${v.name}`;
   const metricCls = (re) => {
-    const hit = st.alarms.find(a => re.test(a.toLowerCase()));
+    const hit = v.alarms.find(a => re.test(a.toLowerCase()));
     if (!hit) return '';
-    return /hi-hi|hot|wet/.test(hit.toLowerCase()) ? 'alarm-text' : 'warn-text';
+    return /hi-hi|hot|wet|critical/.test(hit.toLowerCase()) ? 'alarm-text' : 'warn-text';
   };
   const lvlCls = metricCls(/level/), tmpCls = metricCls(/hot|warm/), mstCls = metricCls(/wet|moist/);
+  const mcard = document.querySelector('.modal-card');
+  mcard.classList.toggle('alarm', v.sev === 'alarm');
+  mcard.classList.toggle('warn', v.sev === 'warn');
   $('m-stats').innerHTML = v.isDiesel ? `
-    <div><label>VOLUME</label><b>${Math.round(v.level).toLocaleString()} L</b></div>
-    <div><label>LEVEL</label><b class="${lvlCls}">${p.toFixed(1)}%</b></div>
-    <div><label>DIP HEIGHT</label><b class="${lvlCls}">${m.toFixed(2)} m</b></div>
+    <div><label>VOLUME</label><b class="${lvlCls}">${Math.round(v.level).toLocaleString()} L</b></div>
+    <div><label>CAPACITY</label><b>${Math.round(v.capacity).toLocaleString()} L</b></div>
+    <div><label>SPACE LEFT</label><b>${Math.round(v.capacity - v.level).toLocaleString()} L</b></div>
     <div><label>FUEL TEMP</label><b class="${tmpCls}">${v.tempC.toFixed(1)} °C</b></div>
     <div><label>GENERATOR</label><b>${v.genOn ? `ON • −${v.genRate} L/h` : 'OFF'}</b></div>`
     : `
-    <div><label>STOCK</label><b>${v.level.toFixed(1)} t</b></div>
-    <div><label>LEVEL</label><b class="${lvlCls}">${p.toFixed(1)}% • ${m.toFixed(1)} m</b></div>
-    <div><label>SEGMENTS</label><b class="${lvlCls}">${segments(v).toFixed(1)} / ${v.capacity / 10}</b></div>
+    <div><label>STOCK</label><b class="${lvlCls}">${v.level.toFixed(1)} t</b></div>
+    <div><label>CAPACITY</label><b>${v.capacity.toFixed(1)} t</b></div>
+    <div><label>SPACE LEFT</label><b>${(v.capacity - v.level).toFixed(1)} t</b></div>
     <div><label>TEMP</label><b class="${tmpCls}">${v.tempC.toFixed(1)} °C</b></div>
     <div><label>MOISTURE</label><b class="${mstCls}">${v.moisture.toFixed(1)} %</b></div>
     <div><label>AERATION</label><b>${v.aeration ? '❄ ON' : 'off'}</b></div>`;
-  $('m-viz').innerHTML = `<div class="bar" style="height:14px"><i style="display:block;height:100%;width:${p}%;background:linear-gradient(90deg,#37c6ff,#ffb020)"></i></div>
+  $('m-viz').innerHTML = `<div class="bar" style="height:14px"><i style="display:block;height:100%;width:${v.pct}%;background:linear-gradient(90deg,#37c6ff,#ffb020)"></i></div>
     <p class="hint">${v.isDiesel ? `Capacity ${Math.round(v.capacity).toLocaleString()} L • Ø1.5 m × L3.0 m horizontal cylinder. Generator draws ${v.genRate} L/h while ON.` : `Capacity ${v.capacity} t • ${v.heightM} m • ${v.capacity / 10} segments × 10 t.`} Fill ${v.fillRate} / discharge ${v.disRate} ${v.rateUnit}.</p>`;
-  $('m-fill').max = v.isDiesel ? 1000 : 120; $('m-dis').max = v.isDiesel ? 1000 : 120;
-  $('m-fill').value = v.fillRate; $('m-dis').value = v.disRate;
-  $('m-fill-v').textContent = `${v.fillRate} ${v.rateUnit}`; $('m-dis-v').textContent = `${v.disRate} ${v.rateUnit}`;
+  $('m-fill').max = v.isDiesel ? 1000 : 120;
+  $('m-dis').max = v.isDiesel ? 1000 : 120;
+  $('m-fill').value = v.fillRate;
+  $('m-dis').value = v.disRate;
+  $('m-fill-v').textContent = `${v.fillRate} ${v.rateUnit}`;
+  $('m-dis-v').textContent = `${v.disRate} ${v.rateUnit}`;
   $('m-aer').textContent = v.isDiesel ? (v.genOn ? '■ Generator ON (tap to stop)' : '⏻ Start generator') : (v.aeration ? '❄ Aeration ON (tap to stop)' : '❄ Toggle aeration');
   $('m-add').textContent = v.isDiesel ? '+200 L' : '+10 t';
   $('m-rem').textContent = v.isDiesel ? '−200 L' : '−10 t';
 }
 
 // global controls
-$('btn-play').onclick = () => { plant.playing = !plant.playing; $('btn-play').textContent = plant.playing ? '⏸ Pause' : '▶ Play'; };
-$('sel-speed').onchange = e => (plant.speed = +e.target.value);
-function setFillAll(on) {
-  plant.fillAll = on;
-  if (on) {
-    plant.emptyAll = false;
-    plant.vessels.forEach(v => { v.disRate = 0; v.fillRate = v.isDiesel ? 500 : 60; });
-  } else {
-    plant.vessels.forEach(v => { v.fillRate = 0; });
-  }
-  syncHeaderButtons();
-}
-function setEmptyAll(on) {
-  plant.emptyAll = on;
-  if (on) {
-    plant.fillAll = false;
-    plant.vessels.forEach(v => { v.fillRate = 0; v.disRate = v.isDiesel ? 300 : 60; });
-  } else {
-    plant.vessels.forEach(v => { v.disRate = 0; });
-  }
-  syncHeaderButtons();
-}
-function setEvents(on) {
-  plant.showEvents = on;
-  $('event-feed').classList.toggle('hidden', !on);
-  if (on) {
-    lastFeed = 0;
-    renderFeed();
-  }
-  syncHeaderButtons();
-}
-function syncHeaderButtons() {
+$('btn-play').onclick = () => global({ playing: !(live && live.playing) });
+$('sel-speed').onchange = e => global({ speed: +e.target.value });
+function syncHeaderButtons(st) {
+  $('btn-play').textContent = st.playing ? '⏸ Pause' : '▶ Play';
+  if (+$('sel-speed').value !== st.speed) $('sel-speed').value = String(st.speed);
   const f = $('btn-fill-all');
-  f.classList.toggle('active', plant.fillAll);
-  f.textContent = plant.fillAll ? '■ Filling all' : '▲ Fill all';
+  f.classList.toggle('active', st.fillAll);
+  f.textContent = st.fillAll ? '■ Filling all' : '▲ Fill all';
   const e = $('btn-empty-all');
-  e.classList.toggle('active', plant.emptyAll);
-  e.textContent = plant.emptyAll ? '■ Emptying all' : '▼ Empty all';
+  e.classList.toggle('active', st.emptyAll);
+  e.textContent = st.emptyAll ? '■ Emptying all' : '▼ Empty all';
   const v = $('btn-events');
-  v.classList.toggle('active', plant.showEvents);
-  v.textContent = plant.showEvents ? '● Events on' : '⚡ Events';
+  v.classList.toggle('active', showEvents);
+  v.textContent = showEvents ? '● Events on' : '⚡ Events';
 }
-$('btn-fill-all').onclick = () => setFillAll(!plant.fillAll);
-$('btn-empty-all').onclick = () => setEmptyAll(!plant.emptyAll);
-$('btn-events').onclick = () => setEvents(!plant.showEvents);
+$('btn-fill-all').onclick = () => global({ fillAll: !(live && live.fillAll) });
+$('btn-empty-all').onclick = () => global({ emptyAll: !(live && live.emptyAll) });
+$('btn-events').onclick = () => setEvents(!showEvents);
 $('feed-close').onclick = () => setEvents(false);
-$('btn-reset').onclick = () => {
-  plant = createPlant();
-  trendVessel = plant.vessels[0];
-  boot(false);
-  syncHeaderButtons();
-  $('event-feed').classList.add('hidden');
+$('btn-reset').onclick = async () => {
+  try {
+    const r = await api('/api/reset', { method: 'POST' });
+    applyState(r.state);
+    notify('Plant reset to initial conditions.');
+  } catch (e) {
+    notify(e.message);
+  }
 };
-$('sel-range').onchange = e => setTrendWindow(+e.target.value);
+$('sel-range').onchange = e => {
+  setTrendWindow(+e.target.value);
+  refreshTrend();
+};
 document.querySelectorAll('.nav').forEach(b => b.onclick = () => {
   document.querySelectorAll('.nav').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   const f = b.dataset.filter;
   document.querySelectorAll('.group[data-group]').forEach(g => {
-    if (['grain', 'dirty', 'cond', 'flour', 'diesel'].includes(g.dataset.group))
+    if (['grain', 'dirty', 'cond', 'flour', 'diesel', 'reports'].includes(g.dataset.group))
       g.style.display = f === 'all' || f === g.dataset.group ? '' : 'none';
   });
   view3d?.setFocus(f);
@@ -146,36 +230,32 @@ $('info-close').onclick = () => $('info-modal').classList.add('hidden');
 $('info-modal').addEventListener('click', e => { if (e.target.id === 'info-modal') $('info-modal').classList.add('hidden'); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') { $('info-modal').classList.add('hidden'); $('modal').classList.add('hidden'); } });
 document.addEventListener('open-vessel', e => openModal(e.detail));
-$('m-fill').oninput = e => { if (modalVessel) { modalVessel.fillRate = +e.target.value; drawModal(); } };
-$('m-dis').oninput = e => { if (modalVessel) { modalVessel.disRate = +e.target.value; drawModal(); } };
-const bump = d => { if (!modalVessel) return; modalVessel.level = Math.min(Math.max(modalVessel.level + d, 0), modalVessel.capacity); drawModal(); };
-$('m-add').onclick = () => bump(modalVessel.isDiesel ? 200 : 10);
-$('m-add1').onclick = () => bump(10);
-$('m-rem').onclick = () => bump(modalVessel.isDiesel ? -200 : -10);
-$('m-aer').onclick = () => {
-  if (!modalVessel) return;
-  if (modalVessel.isDiesel) {
-    if (modalVessel.genOn) {
-      modalVessel.genOn = false;
-    } else {
-      const chk = canStartGenerator(modalVessel);
-      if (!chk.ok) {
-        notify(chk.reason);
-        return;
-      }
-      modalVessel.genOn = true;
-    }
-  } else modalVessel.aeration = !modalVessel.aeration;
-  drawModal();
+$('m-fill').oninput = e => {
+  const v = byId.get(modalId);
+  if (v) $('m-fill-v').textContent = `${e.target.value} ${v.rateUnit}`;
 };
-$('m-topup').onclick = () => { if (modalVessel) { modalVessel.level = modalVessel.capacity * 0.95; drawModal(); } };
-$('m-empty').onclick = () => { if (modalVessel) { modalVessel.level = 0; modalVessel.fillRate = 0; drawModal(); } };
+$('m-fill').onchange = e => { if (modalId) control(modalId, { fillRate: +e.target.value }); };
+$('m-dis').oninput = e => {
+  const v = byId.get(modalId);
+  if (v) $('m-dis-v').textContent = `${e.target.value} ${v.rateUnit}`;
+};
+$('m-dis').onchange = e => { if (modalId) control(modalId, { disRate: +e.target.value }); };
+$('m-add').onclick = () => { const v = byId.get(modalId); if (v) control(modalId, { bump: v.isDiesel ? 200 : 10 }); };
+$('m-add1').onclick = () => { if (modalId) control(modalId, { bump: 10 }); };
+$('m-rem').onclick = () => { const v = byId.get(modalId); if (v) control(modalId, { bump: v.isDiesel ? -200 : -10 }); };
+$('m-aer').onclick = () => {
+  const v = byId.get(modalId);
+  if (!v) return;
+  if (v.isDiesel) control(modalId, { genOn: !v.genOn });
+  else control(modalId, { aeration: !v.aeration });
+};
+$('m-topup').onclick = () => { if (modalId) control(modalId, { topup: true }); };
+$('m-empty').onclick = () => { if (modalId) control(modalId, { empty: true }); };
 
 function collectAlarms() {
   const out = [];
-  for (const v of plant.vessels) {
-    const { alarms } = statusOf(v);
-    alarms.forEach(a => out.push({ text: `${v.id}: ${a}`, sev: /HI-HI|HOT|WET/.test(a) ? 'alarm' : 'warn' }));
+  for (const v of vessels) {
+    v.alarms.forEach(a => out.push({ text: `${v.id}: ${a}`, sev: /HI-HI|HOT|WET|CRITICAL/.test(a) ? 'alarm' : 'warn' }));
   }
   return out;
 }
@@ -185,21 +265,28 @@ function renderFeed() {
   const al = collectAlarms();
   list.innerHTML = al.length
     ? al.map(a => `<li class="${a.sev}">${a.text}</li>`).join('')
-    : '<li class="ok">All clear, no active warnings</li>';
+    : '<li class="ok">All clear. No active warnings</li>';
 }
 
-function updateKpis(amb) {
-  const grains = plant.vessels.filter(v => !v.isDiesel);
+function setEvents(on) {
+  showEvents = on;
+  $('event-feed').classList.toggle('hidden', !on);
+  if (on) renderFeed();
+  if (live) syncHeaderButtons(live);
+}
+
+function updateKpis(st) {
+  const grains = st.vessels.filter(v => !v.isDiesel);
   const stock = grains.reduce((s, v) => s + v.level, 0);
   const cap = grains.reduce((s, v) => s + v.capacity, 0);
   $('kpi-stock').textContent = `${Math.round(stock).toLocaleString()} t`;
-  $('kpi-stock-sub').textContent = `${(stock / cap * 100).toFixed(1)}% of ${cap.toLocaleString()} t`;
+  $('kpi-stock-sub').textContent = `of ${cap.toLocaleString()} t capacity`;
   $('kpi-temp').textContent = `${(grains.reduce((s, v) => s + v.tempC, 0) / grains.length).toFixed(1)}°C`;
-  $('kpi-temp-sub').textContent = `ambient ${amb.temp.toFixed(1)}°C`;
+  $('kpi-temp-sub').textContent = `ambient ${st.ambient.temp.toFixed(1)}°C`;
   $('kpi-hum').textContent = `${(grains.reduce((s, v) => s + v.moisture, 0) / grains.length).toFixed(1)}%`;
-  const dz = plant.vessels.find(v => v.isDiesel);
+  const dz = st.vessels.find(v => v.isDiesel);
   $('kpi-diesel').textContent = `${Math.round(dz.level).toLocaleString()} L`;
-  $('kpi-diesel-sub').textContent = `${levelPct(dz).toFixed(0)}% of ${Math.round(DIESEL_VMAX).toLocaleString()} L`;
+  $('kpi-diesel-sub').textContent = `${Math.round(dz.capacity - dz.level).toLocaleString()} L space left`;
   const al = collectAlarms();
   const texts = al.map(a => a.text);
   $('kpi-alarm').textContent = al.length;
@@ -208,54 +295,29 @@ function updateKpis(amb) {
   const bar = $('alarm-bar');
   if (al.length) { bar.classList.remove('hidden'); bar.textContent = `⚠ ${al.length} active : ${texts.slice(0, 4).join(' • ')}`; }
   else bar.classList.add('hidden');
-  $('amb-t').textContent = `${amb.temp.toFixed(1)}°C`;
-  $('amb-h').textContent = `${amb.rh.toFixed(0)}%`;
-  const d = new Date();
-  $('clock').textContent = d.toLocaleTimeString();
-  $('sim-time').textContent = `T+${plant.simHours.toFixed(1)}h • ${plant.speed}×`;
+  $('amb-t').textContent = `${st.ambient.temp.toFixed(1)}°C`;
+  $('amb-h').textContent = `${st.ambient.rh.toFixed(0)}%`;
+  $('clock').textContent = new Date().toLocaleTimeString();
+  $('sim-time').textContent = `T+${st.simHours.toFixed(1)}h • ${st.speed}×`;
 }
 
-// ---- boot ----
-let view3d = null;
-function boot(first = true) {
-  renderCards(plant, openModal, notify);
-  fillTrendSel();
-  if (first) {
-    view3d = initPlant3D($('plant3d'), plant, openModal);
-    initTrend($('trend'), () => trendVessel);
-  } else {
-    view3d?.destroy();
-    view3d = initPlant3D($('plant3d'), plant, openModal);
+// ---- boot + polling: live state on POLL_STATE_MS, trend/feed on REFRESH_SLOW_MS ----
+async function loadConfig() {
+  try {
+    const c = await api('/api/config');
+    if (c.systemName) {
+      $('brand-name').textContent = c.systemName;
+      document.title = c.systemName;
+    }
+  } catch {
+    /* backend offline: keep the baked-in name */
   }
-  if (modalVessel) { modalVessel = plant.vessels.find(v => v.id === modalVessel.id) || null; if (modalVessel) drawModal(); }
 }
-
-boot();
-
-// ---- main loop: advance sim by real dt × speed, refresh UI at 2Hz ----
-function frame(now) {
-  requestAnimationFrame(frame);
-  const realDt = Math.min((now - lastTick) / 1000, 1);
-  lastTick = now;
-  if (plant.playing) {
-    acc += realDt;
-    // fixed 1s sim steps, scaled by speed
-    let steps = acc * plant.speed;
-    const maxSteps = 600; // avoid spiral
-    steps = Math.min(steps, maxSteps);
-    for (let i = 0; i < Math.floor(steps); i++) tick(plant, 1);
-    acc -= Math.floor(steps) / plant.speed;
-    if (acc > 2) acc = 0;
-  }
-  if (now - lastUi > 500) {
-    lastUi = now;
-    const amb = ambientAt(plant.simHours);
-    refreshCards(plant);
-    view3d?.update();
-    updateKpis(amb);
-    if (modalVessel && !$('modal').classList.contains('hidden')) drawModal();
-  }
-  if (now - lastTrend > 1500) { lastTrend = now; pushTrend(() => trendVessel); }
-  if (plant.showEvents && now - lastFeed > 5000) { lastFeed = now; renderFeed(); }
-}
-requestAnimationFrame(frame);
+loadConfig();
+fetchState();
+setInterval(fetchState, POLL_STATE_MS);
+setInterval(() => {
+  refreshTrend();
+  if (showEvents) renderFeed();
+}, REFRESH_SLOW_MS);
+initReports(() => ({ vessels, simHours: live ? live.simHours : 0 }), notify);

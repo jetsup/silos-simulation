@@ -4,6 +4,7 @@
 
 import * as THREE from 'three';
 import { levelPct, statusOf } from './sim.js';
+import { MODEL_BLINK_MS } from './silo_credentials.js';
 
 const SEV_COLOR = { ok: 0x2ecc71, warn: 0xffae00, alarm: 0xff5252, flow: 0x37c6ff };
 
@@ -173,7 +174,7 @@ export function initPlant3D(container, plant, onSelect) {
 
   function update() {
     // alarm vessels pulse red so they stand out across the plant
-    const blinkOn = Math.floor(Date.now() / 500) % 2 === 0;
+    const blinkOn = Math.floor(Date.now() / MODEL_BLINK_MS) % 2 === 0;
     const flowBlue = new THREE.Color(SEV_COLOR.flow);
     for (const it of items) {
       const p = levelPct(it.v) / 100;

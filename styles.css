@@ -81,7 +81,8 @@ select option{background-color:#182430;color:var(--txt)}
 /* CARD */
 .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:14px;padding:12px;position:relative;overflow:hidden;cursor:pointer;transition:.15s}
 .card:hover{transform:translateY(-2px);border-color:var(--acc2)}
-.card.alarm{border-color:var(--alarm);box-shadow:0 0 0 1px var(--alarm),0 8px 30px #ff4d4d33}
+.card.alarm{border-color:var(--alarm);box-shadow:0 0 0 1px var(--alarm),0 8px 30px #ff4d4d33;animation:card-blink 1s infinite}
+@keyframes card-blink{0%,100%{box-shadow:0 0 0 1px var(--alarm),0 8px 30px #ff4d4d33}50%{box-shadow:0 0 0 1px var(--alarm),0 8px 34px #ff4d4dcc}}
 .card.warn{border-color:var(--warn)}
 .card-head{display:flex;justify-content:space-between;align-items:center}
 .card-head b{font-family:var(--mono)}
@@ -145,6 +146,15 @@ input[type="range"]{width:100%;accent-color:var(--acc)}
 #plant3d canvas{display:block;width:100%!important}
 .plant3d-wrap .tip{position:absolute;top:10px;left:10px;background:#000a;border:1px solid var(--line);border-radius:8px;padding:6px 10px;font-size:12px;font-family:var(--mono)}
 .chart-wrap{height:260px;position:relative}
+.report-box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px}
+.rep-grid{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:12px;align-items:end;margin-bottom:12px}
+.rep-grid label{display:block;font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--mut);margin-bottom:5px}
+.rep-grid select,.rep-grid input[type="datetime-local"]{width:100%}
+.rep-check{padding-bottom:6px;font-size:14px}
+.rep-check input{accent-color:var(--acc);width:16px;height:16px;vertical-align:-3px}
+input[type="datetime-local"]{background:linear-gradient(180deg,#2a3a4c,#1d2835);color:var(--txt);border:1px solid #3a5068;border-radius:10px;min-height:34px;padding:0 10px;font-weight:600;color-scheme:dark}
+input[type="datetime-local"]:disabled{opacity:.45}
+input[type="datetime-local"]:focus{outline:none;border-color:var(--acc);box-shadow:0 0 0 2px #ffb02044}
 .chart-wrap canvas{width:100%!important;height:100%!important}
 .tank-svg{max-width:100%;height:auto}
 .diesel-grid .viz-row{flex-wrap:wrap}

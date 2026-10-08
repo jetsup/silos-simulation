@@ -1,19 +1,19 @@
 // Trend chart built on chart.js. No hand-rolled canvas charting.
 import { Chart, LineController, LineElement, PointElement, LinearScale, CategoryScale, Legend, Tooltip, Filler } from 'chart.js';
+import { TREND_DEFAULT_WINDOW } from './silo_credentials.js';
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, CategoryScale, Legend, Tooltip, Filler);
 
 let chart = null;
-let currentId = null;
-let xWindow = 120; // visible samples on the X axis
+let xWindow = TREND_DEFAULT_WINDOW; // visible samples on the X axis
 
 export function setTrendWindow(n) { xWindow = Math.max(10, n); }
 
-export function initTrend(canvas, getVessel) {
+export function initTrend(canvas) {
   chart = new Chart(canvas, {
     type: 'line',
     data: { labels: [], datasets: [
-      { label: 'Level %', data: [], borderColor: '#ffb020', backgroundColor: '#ffb02022', fill: true, tension: 0.3, pointRadius: 0, yAxisID: 'y' },
+      { label: 'Stock (t)', data: [], borderColor: '#ffb020', backgroundColor: '#ffb02022', fill: true, tension: 0.3, pointRadius: 0, yAxisID: 'y' },
       { label: 'Temp °C', data: [], borderColor: '#ff4d6d', tension: 0.3, pointRadius: 0, yAxisID: 'y1' },
       { label: 'Moist %', data: [], borderColor: '#37c6ff', tension: 0.3, pointRadius: 0, yAxisID: 'y1' }
     ]},
@@ -28,21 +28,20 @@ export function initTrend(canvas, getVessel) {
       }
     }
   });
-  currentId = getVessel().id;
   return chart;
 }
 
-export function pushTrend(getVessel) {
+// Render the trend from database rows (ascending): [{ts, level, temp_c, moisture}].
+// Capacity converts level to %; diesel has no moisture series.
+export function setTrendData(rows, capacity, isDiesel) {
   if (!chart) return;
-  const v = getVessel();
-  if (v.id !== currentId) {
-    currentId = v.id;
-    chart.data.labels = []; chart.data.datasets.forEach(d => (d.data = []));
-  }
-  const h = v.hist.slice(-xWindow);
-  chart.data.labels = h.map((_, i) => `-${h.length - 1 - i}`);
-  chart.data.datasets[0].data = h.map(s => +s.p.toFixed(1));
-  chart.data.datasets[1].data = h.map(s => +s.t.toFixed(1));
-  chart.data.datasets[2].data = v.isDiesel ? h.map(() => null) : h.map(s => +s.m.toFixed(2));
+  const h = rows.slice(-xWindow);
+  const cap = capacity || 1;
+  chart.options.scales.y.min = 0;
+  chart.options.scales.y.max = cap;
+  chart.data.labels = h.map(r => new Date(r.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+  chart.data.datasets[0].data = h.map(r => +Number(r.level).toFixed(1));
+  chart.data.datasets[1].data = h.map(r => (r.temp_c == null ? null : +Number(r.temp_c).toFixed(1)));
+  chart.data.datasets[2].data = isDiesel ? h.map(() => null) : h.map(r => (r.moisture == null ? null : +Number(r.moisture).toFixed(2)));
   chart.update('none');
 }
